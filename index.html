@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pololingo</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="theme-color" content="#c8102e">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Pololingo">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo">P</span> Pololingo</div>
+    <nav id="nav">
+      <button data-view="learn" class="active"><i>📚</i><span>Lernen</span></button>
+      <button data-view="shadow"><i>🗣️</i><span>Shadowing</span></button>
+      <button data-view="stories"><i>📖</i><span>Geschichten</span></button>
+      <button data-view="mine"><i>✍️</i><span>Meine Sätze</span></button>
+      <button data-view="lessons" class="desk"><i>🗂️</i><span>Lektionen</span></button>
+      <button data-view="sounds" class="desk"><i>👄</i><span>Aussprache</span></button>
+      <button data-view="stats" class="desk"><i>📈</i><span>Fortschritt</span></button>
+      <button data-view="settings" class="desk" title="Einstellungen"><i>⚙️</i><span>Einstellungen</span></button>
+      <button data-view="more" class="mob"><i>☰</i><span>Mehr</span></button>
+    </nav>
+  </header>
+  <main id="app"></main>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="data.js"></script>
+  <script src="fsrs.js"></script>
+  <script src="app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js");
+  </script>
+</body>
+</html>
