@@ -1,6 +1,6 @@
 // Offline-Cache für Pololingo. Bei Änderungen an Dateien VERSION erhöhen.
-const VERSION = "pololingo-3";
-const FILES = ["./", "./index.html", "./style.css", "./app.js", "./fsrs.js", "./data.js", "./manifest.json",
+const VERSION = "pololingo-4";
+const FILES = ["./", "./index.html", "./style.css", "./app.js", "./fsrs.js", "./data.js", "./grammar.js", "./manifest.json",
   "./icon.svg", "./icon-192.png", "./icon-512.png", "./icon-maskable.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", e => {

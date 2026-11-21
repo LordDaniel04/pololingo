@@ -10,12 +10,13 @@
   // ---------- Zustand ----------
   const defaults = () => ({
     version: 1,
-    settings: { name: "", gender: "", newPerDay: 8, retention: 0.9, autoplay: true, rate: 1, voice: "", listenText: false },
+    settings: { name: "", gender: "", newPerDay: 8, retention: 0.9, autoplay: true, rate: 1, voice: "", listenText: false, drillsPerDay: 6 },
+    unlocked: {},     // Grammatik-Einheiten, die manuell freigeschaltet wurden
     cards: {},        // "sentId:kind" -> Karte
     introduced: {},   // sentId -> Zeitpunkt
     custom: [],       // eigene Sätze
     log: [],          // [Zeit, cardId, Bewertung, Zustand vorher]
-    daily: { day: 0, newSent: 0, shadow: 0 }
+    daily: { day: 0, newSent: 0, newDrill: 0, shadow: 0 }
   });
   let S = load();
   function load() {
@@ -33,14 +34,22 @@
   }
   function today() {
     const d = FSRS.startOfDay(Date.now());
-    if (S.daily.day !== d) S.daily = { day: d, newSent: 0, shadow: 0 };
+    if (S.daily.day !== d) S.daily = { day: d, newSent: 0, newDrill: 0, shadow: 0 };
+    S.daily.newDrill = S.daily.newDrill || 0;
     return S.daily;
   }
 
   // ---------- Sätze ----------
-  let SENT = {}, ORDER = [];
+  let SENT = {}, ORDER = [], DORDER = [];
   function buildSentences() {
-    SENT = {}; ORDER = [];
+    SENT = {}; ORDER = []; DORDER = [];
+    (window.GRAMMAR || []).forEach((U, ui) => {
+      U.drills.forEach((x, i) => {
+        const id = U.id + "-" + String(i + 1).padStart(2, "0");
+        SENT[id] = { id, drill: true, unit: U.id, unitIdx: ui, base: x[0], cue: x[1], pl: x[2], de: x[3], note: x[4] || "", lesson: "Grammatik: " + U.title };
+        DORDER.push(id);
+      });
+    });
     for (const c of S.custom) {
       SENT[c.id] = { id: c.id, pl: c.pl, de: c.de, note: c.note || "", lesson: "Meine Sätze", custom: true };
       ORDER.push(c.id);
@@ -54,6 +63,12 @@
     });
   }
   buildSentences();
+  function unitOpen(U) {
+    if (S.unlocked[U.id]) return true;
+    const pre = ORDER.filter(id => id.startsWith(U.after + "-"));
+    return pre.length > 0 && pre.every(id => S.introduced[id]);
+  }
+  const UNIT = id => (window.GRAMMAR || []).find(U => U.id === id);
 
   function fill(t) {
     const g = S.settings.gender === "f" ? 1 : 0;
@@ -181,6 +196,14 @@
   function introduce(sentId, known) {
     const now = Date.now();
     S.introduced[sentId] = now;
+    if (SENT[sentId] && SENT[sentId].drill) {
+      today().newDrill++;
+      const c = newCard(sentId, "drill", now + 45 * 1000);
+      if (known) Object.assign(c, { state: "review", s: 8, d: 4, reps: 1, last: now, ivl: 7, due: now + (5 + Math.random() * 5) * DAY });
+      S.cards[c.id] = c;
+      save();
+      return;
+    }
     today().newSent++;
     const tomorrow = FSRS.startOfDay(now) + DAY + 4 * 60 * MIN;
     if (known) {
@@ -205,7 +228,7 @@
     save();
   }
   function sentStatus(id) {
-    const cs = [S.cards[id + ":speak"], S.cards[id + ":listen"]].filter(Boolean);
+    const cs = [S.cards[id + ":speak"], S.cards[id + ":listen"], S.cards[id + ":drill"]].filter(Boolean);
     if (!cs.length) return "new";
     if (cs.every(c => c.state === "review" && c.s >= 21)) return "mature";
     if (cs.some(c => c.state === "review")) return "review";
@@ -227,7 +250,7 @@
 
   // ---------- Lern-Session ----------
   let cur = null; // { type: 'intro'|'card', id, card, revealed, result }
-  let sinceNew = 0;
+  let sinceNew = 0, drillTurn = false;
   function counts() {
     const now = Date.now();
     let learn = 0, review = 0, aheadSoon = 0;
@@ -239,17 +262,25 @@
     }
     const newLeft = Math.max(0, (S.settings.newPerDay | 0) - today().newSent);
     const nextNew = ORDER.filter(id => !S.introduced[id]).slice(0, newLeft);
-    return { learn, review, aheadSoon, newLeft: nextNew.length, nextNew };
+    const drillLeft = Math.max(0, (S.settings.drillsPerDay | 0) - today().newDrill);
+    const openUnits = new Set((window.GRAMMAR || []).filter(unitOpen).map(U => U.id));
+    const nextDrill = DORDER.filter(id => !S.introduced[id] && openUnits.has(SENT[id].unit)).slice(0, drillLeft);
+    return { learn, review, aheadSoon, newLeft: nextNew.length + nextDrill.length, nextNew, nextDrill };
   }
   function pickNext() {
     const now = Date.now();
     const all = Object.values(S.cards).filter(c => !c.suspended && SENT[c.sent]);
     const dueLearn = all.filter(c => c.state !== "review" && c.due <= now).sort((a, b) => a.due - b.due);
     const dueRev = all.filter(c => c.state === "review" && c.due <= now).sort((a, b) => a.due - b.due);
-    const { nextNew } = counts();
+    const { nextNew, nextDrill } = counts();
+    // Drills und Sätze abwechselnd; ein Drill-Block einer Einheit startet mit der Erklärung
+    const pickNew = () => {
+      if (nextDrill.length && (!nextNew.length || drillTurn)) { drillTurn = false; return nextDrill[0]; }
+      drillTurn = true; return nextNew[0];
+    };
     // Lernkarten zuerst, neue Sätze ins Wiederholen einstreuen
     if (dueLearn.length) return { type: "card", card: dueLearn[0] };
-    if (nextNew.length && (sinceNew >= 3 || !dueRev.length)) { sinceNew = 0; return { type: "intro", id: nextNew[0] }; }
+    if ((nextNew.length || nextDrill.length) && (sinceNew >= 3 || !dueRev.length)) { sinceNew = 0; return { type: "intro", id: pickNew() }; }
     if (dueRev.length) { sinceNew++; return { type: "card", card: dueRev[0] }; }
     const ahead = all.filter(c => c.state !== "review" && c.due <= now + 20 * MIN).sort((a, b) => a.due - b.due);
     if (ahead.length) return { type: "card", card: ahead[0] };
@@ -262,6 +293,7 @@
     if (cur && S.settings.autoplay) {
       if (cur.type === "intro") speak(PL(cur.id));
       else if (cur.card.kind === "listen") speak(PL(cur.card.sent));
+      else if (cur.card.kind === "drill") speak(fill(SENT[cur.card.sent].base));
     }
   }
 
@@ -269,7 +301,7 @@
   let view = "learn";
   function setView(v) {
     view = v;
-    const sub = ["lessons", "sounds", "stats", "settings"].includes(v);
+    const sub = ["mine", "lessons", "sounds", "stats", "settings"].includes(v);
     document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.view === v || (sub && b.dataset.view === "more")));
     speechSynthesis && speechSynthesis.cancel();
     stopStory();
@@ -305,7 +337,7 @@
       <div class="today">
         <div class="stat"><b>${c.review + c.learn}</b><span>fällige Karten</span></div>
         <div class="stat"><b>${c.newLeft}</b><span>neue Sätze heute</span></div>
-        <div class="stat"><b>${totalIntro}</b><span>Sätze bisher</span></div>
+        <div class="stat"><b>${totalIntro}</b><span>Sätze &amp; Drills bisher</span></div>
       </div>
       ${any ? `<button class="btn primary reveal" data-act="start">Los geht's</button>
         <p class="hint">Tipp: Sprich jede Antwort <b>laut</b> aus, bevor du aufdeckst. Das trainiert genau das, was du im Gespräch brauchst.</p>`
@@ -318,9 +350,42 @@
         <p><b>Neuer Satz:</b> Hören, zweimal laut nachsprechen, Bedeutung merken.</p>
         <p><b>Sprechen-Karte:</b> Du siehst Deutsch und sagst den Satz auf Polnisch. Mit 🎙 prüft die Spracherkennung, wie nah du dran warst.</p>
         <p><b>Hören-Karte:</b> Du hörst Polnisch und sagst dir, was es bedeutet.</p>
+        <p><b>Grammatik-Drill:</b> Du siehst einen Satz und eine Umformung (z. B. „→ ty“ oder „→ wczoraj“) und sagst den neuen Satz laut.</p>
         <p style="margin:0"><b>Bewerten:</b> „Nochmal“, wenn du es nicht wusstest. „Gut“, wenn es geklappt hat. Der FSRS-Algorithmus zeigt dir jede Karte genau dann wieder, wenn du sie sonst vergessen würdest.</p>
       </div>`;
   };
+
+  function unitSeen(uid) { return DORDER.some(id => SENT[id].unit === uid && S.introduced[id]); }
+  function tableHtml(U) {
+    const t = U.table;
+    return `<div class="gtable"><table><thead><tr>${t.head.map(h => `<th>${esc(h)}</th>`).join("")}<th></th></tr></thead><tbody>
+      ${t.rows.map(r => `<tr>${r.map((c, i) => `<td class="${t.say.includes(i) ? "plc" : ""}">${esc(c)}</td>`).join("")}
+        <td><button class="btn icon ghost" data-text="${esc(t.say.map(i => r[i]).join(". "))}">🔊</button></td></tr>`).join("")}
+      </tbody></table></div>`;
+  }
+  function drillIntroHtml(id) {
+    const s = SENT[id], U = UNIT(s.unit);
+    const first = !unitSeen(U.id);
+    return `<div class="card study">
+      <div class="kind"><span class="tag">${first ? "Neues Grammatik-Muster" : "Neuer Drill"}</span> · ${esc(U.title)}</div>
+      ${first ? `<div class="gexplain">${U.explain.map(p => `<p>${esc(p)}</p>`).join("")}</div>${tableHtml(U)}
+        <h3 style="margin-top:18px">So geht der Drill</h3>` : ""}
+      <div class="prompt pl" style="margin:10px 0 4px">${esc(fill(s.base))}</div>
+      <div class="cue">→ ${esc(fill(s.cue))}</div>
+      <div class="answer" style="margin-top:12px"><div class="pl">${esc(PL(id))}</div><div class="de">${esc(DE(id))}</div>
+        ${s.note ? `<div class="note">${esc(fill(s.note))}</div>` : ""}</div>
+      <div class="row" style="margin-top:16px">
+        <button class="btn" data-act="play">🔊 Anhören <kbd>R</kbd></button>
+        <button class="btn" data-act="slow">🐢 Langsam <kbd>S</kbd></button>
+        ${Rec ? `<button class="btn" data-act="mic">🎙 Nachsprechen prüfen <kbd>M</kbd></button>` : ""}
+      </div>
+      <div id="micres">${cur.result ? diffHtml(cur.result) : ""}</div>
+      ${first ? `<p class="small muted" style="margin-top:14px">Später siehst du nur den Ausgangssatz und die Umformung und sagst die Lösung laut. Erst sprechen, dann aufdecken.</p>` : ""}
+      <div class="controls row">
+        <button class="btn" data-act="known">Kann ich schon</button><span class="spacer"></span>
+        <button class="btn primary" data-act="introok">Weiter <kbd>Leertaste</kbd></button>
+      </div></div>`;
+  }
 
   function studyHtml() {
     const c = counts();
@@ -329,6 +394,7 @@
         <span>Noch ${left} · neu ${c.newLeft} · fällig ${c.review + c.learn}</span><span class="spacer"></span>
         <button class="btn ghost small" data-act="stop">Pause</button></div>`;
     if (!cur) return "";
+    if (cur.type === "intro" && SENT[cur.id].drill) return hdr + drillIntroHtml(cur.id);
     if (cur.type === "intro") {
       const id = cur.id, s = SENT[id];
       return hdr + `<div class="card study">
@@ -353,10 +419,17 @@
         </div></div>`;
     }
     const card = cur.card, id = card.sent, s = SENT[id];
-    const isSpeak = card.kind === "speak";
+    const isSpeak = card.kind === "speak" || card.kind === "drill";
     const pv = FSRS.preview(card, Date.now(), opts());
     const sugg = cur.result ? (cur.result.score >= 0.95 ? 3 : cur.result.score >= 0.7 ? 2 : 1) : 0;
-    const front = isSpeak
+    const front = card.kind === "drill"
+      ? `<div class="kind"><span class="tag">Umformen</span> · ${esc(UNIT(s.unit).title)}</div>
+         <div class="prompt pl" style="margin-bottom:4px">${esc(fill(s.base))}</div>
+         <div class="cue">→ ${esc(fill(s.cue))}</div>
+         ${cur.hint && !cur.revealed ? `<div class="muted" style="margin-top:8px">${esc(DE(id))}</div>` : ""}
+         ${!cur.revealed ? `<div class="row" style="margin-top:14px">${Rec ? `<button class="btn rec" data-act="mic">🎙 Laut sagen &amp; prüfen <kbd>M</kbd></button>` : ""}
+           ${cur.hint ? "" : `<button class="btn ghost" data-act="hint">Hinweis (Deutsch)</button>`}</div>` : ""}`
+      : isSpeak
       ? `<div class="kind"><span class="tag">Sprechen</span> · Sag es auf Polnisch</div>
          <div class="prompt">${esc(DE(id))}</div>
          ${!cur.revealed && Rec ? `<div class="row" style="margin-top:8px"><button class="btn rec" data-act="mic">🎙 Laut sagen &amp; prüfen <kbd>M</kbd></button></div>` : ""}`
@@ -555,9 +628,35 @@
       </div>`;
   };
 
+  // Grammatik
+  VIEWS.grammar = function () {
+    const G = window.GRAMMAR || [];
+    return `<h1>Grammatik zum Sprechen</h1>
+      <p class="muted">Kurze Erklärung, eine Tabelle, dann Umform-Drills: Du hörst einen Satz und sagst ihn laut mit anderer Person, Zeit oder Form. So wird aus Regelwissen ein Automatismus. Die Drills kommen beim Lernen von selbst dran, sobald die passende Lektion durch ist.</p>
+      ${G.map((U, ui) => {
+        const ids = DORDER.filter(id => SENT[id].unit === U.id);
+        const done = ids.filter(id => S.introduced[id]).length;
+        const open = unitOpen(U);
+        const li = LESSONS.findIndex(L => L.id === U.after);
+        return `<details class="lesson"><summary>
+          <div style="flex:1"><b>${ui + 1}. ${esc(U.title)}</b><div class="small muted">${open ? (done ? `${done} von ${ids.length} Drills gelernt` : "Freigeschaltet, kommt beim Lernen dran") : `Kommt nach Lektion ${li + 1}`}</div></div>
+          <span class="badge ${open ? (done === ids.length ? "mature" : "review") : ""}">${open ? (done === ids.length ? "fertig" : "offen") : "später"}</span></summary>
+          <div class="body">
+            <div class="gexplain">${U.explain.map(p => `<p>${esc(p)}</p>`).join("")}</div>
+            ${tableHtml(U)}
+            <h3 style="margin-top:16px">Drills</h3>
+            <div class="list">${ids.map(id => { const d = SENT[id], st = sentStatus(id); return `<div class="item">
+              <button class="btn icon ghost" data-say="${esc(id)}">🔊</button>
+              <div class="txt"><div class="small muted">${esc(fill(d.base))} → ${esc(fill(d.cue))}</div><div class="pl">${esc(PL(id))}</div></div>
+              <span class="badge ${st}">${STATUS_LABEL[st]}</span></div>`; }).join("")}</div>
+            ${open ? "" : `<div class="row" style="margin-top:12px"><button class="btn" data-unlock="${U.id}">Jetzt schon freischalten</button></div>`}
+          </div></details>`;
+      }).join("")}`;
+  };
+
   // Mehr (Handy-Menü)
   VIEWS.more = function () {
-    const items = [["lessons", "🗂️", "Lektionen", "Alle Sätze nach Themen"], ["sounds", "👄", "Aussprache", "Die polnischen Laute zum Anhören"],
+    const items = [["mine", "✍️", "Meine Sätze", "Eigene Sätze sammeln (Sentence Mining)"], ["lessons", "🗂️", "Lektionen", "Alle Sätze nach Themen"], ["sounds", "👄", "Aussprache", "Die polnischen Laute zum Anhören"],
       ["stats", "📈", "Fortschritt", "Was du schon sagen kannst"], ["settings", "⚙️", "Einstellungen", "Name, Tempo, Stimme, Sicherung"]];
     return `<h1>Mehr</h1><div class="card list more-list">${items.map(([v, i, t, d]) =>
       `<div class="item" data-view-link="${v}"><i>${i}</i><div class="txt"><div class="pl">${t}</div><div class="de">${d}</div></div><span class="muted">›</span></div>`).join("")}</div>`;
@@ -629,6 +728,7 @@
         <div class="f"><span class="small muted" style="display:block;margin-bottom:4px">Wie sprichst du über dich? (byłem / byłam, zmęczony / zmęczona)</span>
           <div class="seg"><button data-gender="m" class="${st.gender !== "f" ? "on" : ""}">männliche Formen</button><button data-gender="f" class="${st.gender === "f" ? "on" : ""}">weibliche Formen</button></div></div>
         <label class="f" style="margin-top:14px"><span>Neue Sätze pro Tag (jeder Satz = 2 Karten)</span><input type="number" id="s-new" min="0" max="50" value="${st.newPerDay}"></label>
+        <label class="f"><span>Neue Grammatik-Drills pro Tag</span><input type="number" id="s-drill" min="0" max="50" value="${st.drillsPerDay}"></label>
         <label class="f"><span>Ziel-Trefferquote (höher = öfter wiederholen)</span>
           <select id="s-ret">${[0.85, 0.88, 0.9, 0.92, 0.95].map(r => `<option value="${r}" ${st.retention == r ? "selected" : ""}>${Math.round(r * 100)} %</option>`).join("")}</select></label>
       </div>
@@ -680,6 +780,10 @@
   }
 
   // ---------- Ereignisse ----------
+  function baseOrText(text) {
+    if (view === "learn" && cur && cur.type === "card" && cur.card.kind === "drill" && !cur.revealed) return fill(SENT[cur.card.sent].base);
+    return text;
+  }
   function curText() {
     if (view === "shadow") return PL(shadowId);
     if (!cur) return null;
@@ -694,7 +798,7 @@
       const alts = await listen();
       const res = bestMatch(target, alts);
       if (view === "shadow") shadowRes = res; else if (cur) cur.result = res;
-      if (view === "learn" && cur && cur.type === "card" && cur.card.kind === "speak" && !cur.revealed) { cur.revealed = true; render(); speak(target); return; }
+      if (view === "learn" && cur && cur.type === "card" && cur.card.kind !== "listen" && !cur.revealed) { cur.revealed = true; render(); speak(target); return; }
       const b = $("#micres"); if (b) b.innerHTML = diffHtml(res);
     } catch (e) {
       const b = $("#micres"); if (b) b.innerHTML = `<div class="heard"><span class="label">${esc(e.message)}</span></div>`;
@@ -703,7 +807,7 @@
   function reveal() {
     if (!cur || cur.type !== "card" || cur.revealed) return;
     cur.revealed = true; render();
-    if (cur.card.kind === "speak" && S.settings.autoplay) speak(PL(cur.card.sent));
+    if (cur.card.kind !== "listen" && S.settings.autoplay) speak(PL(cur.card.sent));
   }
   function rate(g) {
     if (!cur || cur.type !== "card" || !cur.revealed) return;
@@ -733,6 +837,7 @@
       delete S.cards[id + ":speak"]; delete S.cards[id + ":listen"]; delete S.introduced[id];
       save(); buildSentences(); return render();
     }
+    if (t.dataset.unlock) { S.unlocked[t.dataset.unlock] = true; save(); toast("Freigeschaltet. Die Drills kommen beim nächsten Lernen dran."); return render(); }
     if (t.dataset.gender) { S.settings.gender = t.dataset.gender; save(); return render(); }
     if (t.classList.contains("story-line") && !e.target.closest("button")) {
       const st = STORIES.find(x => x.id === storyId);
@@ -745,8 +850,9 @@
       case "start": sinceNew = 0; return advance();
       case "stop": cur = null; speechSynthesis.cancel(); return render();
       case "extra": S.settings.newPerDay = (S.settings.newPerDay | 0); today().newSent = Math.max(0, today().newSent - 5); save(); return advance();
-      case "play": return text && speak(text);
-      case "slow": return text && speak(text, 0.65);
+      case "play": return text && speak(baseOrText(text));
+      case "slow": return text && speak(baseOrText(text), 0.65);
+      case "hint": cur.hint = true; return render();
       case "mic": return doMic();
       case "reveal": return reveal();
       case "showtext": cur.showText = true; return render();
@@ -796,6 +902,7 @@
     if (t.id === "shadowpool") { shadowPool = t.value; nextShadow(); return render(); }
     if (t.id === "s-name") st.name = t.value.trim();
     else if (t.id === "s-new") st.newPerDay = Math.max(0, Math.min(50, +t.value | 0));
+    else if (t.id === "s-drill") st.drillsPerDay = Math.max(0, Math.min(50, +t.value | 0));
     else if (t.id === "s-ret") st.retention = +t.value;
     else if (t.id === "s-voice") st.voice = t.value;
     else if (t.id === "s-auto") st.autoplay = t.checked;
@@ -822,8 +929,8 @@
         e.preventDefault();
         if (cur.type === "intro") introOk(); else if (!cur.revealed) reveal(); else rate(3);
       } else if (["1", "2", "3", "4"].includes(k) && cur.type === "card" && cur.revealed) rate(+k);
-      else if (k === "r") speak(curText());
-      else if (k === "s") speak(curText(), 0.65);
+      else if (k === "r") speak(baseOrText(curText()));
+      else if (k === "s") speak(baseOrText(curText()), 0.65);
       else if (k === "m" && Rec) doMic();
     } else if (view === "shadow") {
       if (k === "r") speak(curText()); else if (k === "s") speak(curText(), 0.65);

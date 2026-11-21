@@ -260,3 +260,11 @@ nav button.mob { display: none; }
   .today { grid-template-columns: repeat(2, 1fr); }
   .stat span { overflow-wrap: anywhere; }
 }
+
+/* Grammatik */
+.cue { display: inline-block; font-size: 18px; font-weight: 600; color: var(--accent); background: var(--accent-soft); padding: 3px 12px; border-radius: 99px; }
+.gexplain p { font-size: 15px; }
+.gtable { overflow-x: auto; margin-top: 6px; }
+.gtable td.plc { font-weight: 600; }
+.gtable td, .gtable th { padding: 7px 6px; }
+.study .cue { align-self: flex-start; }
